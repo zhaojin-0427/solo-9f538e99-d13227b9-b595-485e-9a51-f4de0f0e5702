@@ -13,6 +13,10 @@ from . import service
 from .database import init_db
 from .models import (
     AssemblyOut,
+    CalibrationIn,
+    CalibrationOut,
+    CalibrationUploadOut,
+    ConversionOut,
     FragmentIn,
     FragmentOut,
     PublicationOut,
@@ -27,10 +31,12 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Seismic Waveform Assembly API",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Ingest out-of-order waveform fragments, assemble them into whole "
-        "UTC-minute records and publish immutable minutes for phase pickers."
+        "UTC-minute records and publish immutable minutes for phase pickers. "
+        "Station calibrations (zero counts and microgals/count gains) convert "
+        "published count waveforms into per-second microgal conversion records."
     ),
     lifespan=lifespan,
 )
@@ -106,4 +112,55 @@ def get_publication(pub_id: int) -> JSONResponse | dict[str, Any]:
     result = service.get_publication(pub_id)
     if result is None:
         return JSONResponse(status_code=404, content={"detail": "publication not found"})
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Calibrations
+# --------------------------------------------------------------------------- #
+@app.post("/calibrations", response_model=CalibrationUploadOut, status_code=201)
+def upload_calibration(cal: CalibrationIn) -> dict[str, Any]:
+    return service.upload_calibration(cal.model_dump())
+
+
+@app.get("/calibrations", response_model=list[CalibrationOut])
+def list_calibrations(station: str = Query(min_length=1)) -> list[dict[str, Any]]:
+    return service.list_calibrations(station)
+
+
+# --------------------------------------------------------------------------- #
+# Conversions (counts -> microgals)
+# --------------------------------------------------------------------------- #
+@app.post("/conversions", response_model=ConversionOut, status_code=201)
+def convert_minute(
+    station: str = Query(min_length=1),
+    minute_utc: datetime = Query(description="UTC minute, e.g. 2026-11-17T05:06:00Z"),
+) -> dict[str, Any]:
+    return service.convert_minute(station, minute_utc)
+
+
+@app.get("/conversions", response_model=list[ConversionOut])
+def list_conversions(
+    station: str | None = Query(default=None),
+    minute_utc: datetime | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    return service.list_conversions(station, minute_utc)
+
+
+@app.get("/conversions/latest", response_model=ConversionOut)
+def get_latest_conversion(
+    station: str = Query(min_length=1),
+    minute_utc: datetime = Query(...),
+) -> JSONResponse | dict[str, Any]:
+    result = service.get_latest_conversion(station, minute_utc)
+    if result is None:
+        return JSONResponse(status_code=404, content={"detail": "conversion not found"})
+    return result
+
+
+@app.get("/conversions/{conv_id}", response_model=ConversionOut)
+def get_conversion(conv_id: int) -> JSONResponse | dict[str, Any]:
+    result = service.get_conversion(conv_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"detail": "conversion not found"})
     return result

@@ -73,3 +73,73 @@ class PublicationOut(BaseModel):
     fragment_set_hash: str
     created_at: str
     items: list[PublicationItemOut]
+
+
+class CalibrationIn(BaseModel):
+    station: str = Field(min_length=1, max_length=64)
+    effective_at: datetime = Field(
+        description="UTC whole second when the calibration takes effect, "
+        "e.g. 2026-11-17T05:05:00Z"
+    )
+    revision: int = Field(ge=1)
+    zero_count: int
+    gain: int = Field(description="Non-zero integer gain in microgals per count")
+
+    @field_validator("station")
+    @classmethod
+    def _station_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("station must not be blank")
+        return v
+
+    @field_validator("effective_at")
+    @classmethod
+    def _whole_second(cls, v: datetime) -> datetime:
+        # A calibration becomes effective at a whole UTC second.
+        if v.microsecond != 0:
+            raise ValueError("effective_at must be a whole second (microseconds=0)")
+        return v
+
+    @field_validator("gain")
+    @classmethod
+    def _gain_nonzero(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("gain must be a non-zero integer")
+        return v
+
+
+class CalibrationOut(BaseModel):
+    id: int
+    station: str
+    effective_at: datetime
+    revision: int
+    zero_count: int
+    gain: int
+    content_hash: str
+    created_at: str
+
+
+class CalibrationUploadOut(CalibrationOut):
+    status: str
+
+
+class ConversionItemOut(BaseModel):
+    sample: int
+    effective_at: datetime
+    revision: int
+    zero_count: int
+    gain: int
+    value: int
+
+
+class ConversionOut(BaseModel):
+    id: int
+    station: str
+    minute_utc: datetime
+    publication_id: int
+    values: list[int]
+    stale: bool
+    calibration_set_hash: str
+    publication_wave_hash: str
+    created_at: str
+    items: list[ConversionItemOut]

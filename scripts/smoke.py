@@ -129,6 +129,99 @@ def main() -> int:
                  params={"station": "NOPE", "minute_utc": MIN})
     check("unknown publication 404", r.status_code == 404)
 
+    # 13. Calibration validation: zero gain and sub-second times are rejected.
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:05:00Z",
+                  "revision": 1, "zero_count": 10, "gain": 0})
+    check("zero gain rejected", r.status_code == 422)
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:05:00.5Z",
+                  "revision": 1, "zero_count": 10, "gain": 2})
+    check("sub-second effective_at rejected", r.status_code == 422)
+
+    # 14. Calibration revision semantics mirror fragments.
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:05:00Z",
+                  "revision": 1, "zero_count": 10, "gain": 2})
+    check("calibration accepted", r.status_code == 201
+          and r.json()["status"] == "accepted")
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:05:00Z",
+                  "revision": 1, "zero_count": 10, "gain": 2})
+    check("calibration idempotent retry", r.status_code == 201
+          and r.json()["status"] == "unchanged")
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:05:00Z",
+                  "revision": 1, "zero_count": 11, "gain": 2})
+    check("calibration same-revision different-content rejected",
+          r.status_code == 409)
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:05:00Z",
+                  "revision": 2, "zero_count": 10, "gain": 3})
+    check("calibration higher revision supersedes", r.status_code == 201
+          and r.json()["status"] == "superseded")
+    rows = http.get("/calibrations", params={"station": ST}).json()
+    check("single calibration row per effective time", len(rows) == 1
+          and rows[0]["revision"] == 2)
+
+    # 15. Convert the current (corrected, re-published) minute to microgals.
+    r = http.post("/conversions", params={"station": ST, "minute_utc": MIN})
+    check("conversion succeeds", r.status_code == 201)
+    conv1 = r.json()
+    expected_wave = [42] + list(range(1, 60))
+    check("microgal values match (count-zero)*gain",
+          conv1["values"] == [(v - 10) * 3 for v in expected_wave])
+    check("60 per-slot items with pinned calibration revision",
+          len(conv1["items"]) == 60
+          and all(it["revision"] == 2 for it in conv1["items"]))
+    check("conversion pins source publication",
+          conv1["publication_id"] == pub2["id"])
+
+    # 16. Re-conversion of identical sources is idempotent; reads by id/latest.
+    r = http.post("/conversions", params={"station": ST, "minute_utc": MIN})
+    check("re-conversion idempotent", r.status_code == 201
+          and r.json()["id"] == conv1["id"])
+    check("conversion readable by id",
+          http.get(f"/conversions/{conv1['id']}").json()["values"]
+          == conv1["values"])
+    check("conversion latest endpoint",
+          http.get("/conversions/latest",
+                   params={"station": ST, "minute_utc": MIN}).json()["id"]
+          == conv1["id"])
+
+    # 17. Backfill a later calibration: slots >=30 switch to it; old record
+    # stays readable but is marked stale, new conversion carries provenance.
+    r = http.post("/calibrations", json={"station": ST,
+                  "effective_at": "2026-11-17T05:06:30Z",
+                  "revision": 1, "zero_count": 0, "gain": 1})
+    check("later calibration accepted", r.status_code == 201)
+    check("old conversion marked stale after backfill",
+          http.get(f"/conversions/{conv1['id']}").json()["stale"] is True)
+    conv2 = http.post(
+        "/conversions", params={"station": ST, "minute_utc": MIN}).json()
+    check("new conversion uses both calibrations",
+          {it["effective_at"] for it in conv2["items"][:30]}
+          == {"2026-11-17T05:05:00Z"}
+          and {it["effective_at"] for it in conv2["items"][30:]}
+          == {"2026-11-17T05:06:30Z"})
+    check("new conversion values per slot",
+          conv2["values"][:30] == [(v - 10) * 3 for v in expected_wave[:30]]
+          and conv2["values"][30:] == expected_wave[30:])
+    listing = http.get(
+        "/conversions", params={"station": ST, "minute_utc": MIN}).json()
+    check("conversion history retained with stale flags",
+          [c["id"] for c in listing] == [conv1["id"], conv2["id"]]
+          and [c["stale"] for c in listing] == [True, False])
+
+    # 18. Missing calibration for any slot rejects the whole minute cleanly.
+    http.post("/fragments", json=frag(1, 1, 0, list(range(30)), station="NOCAL"))
+    http.post("/fragments", json=frag(2, 1, 30, list(range(30, 60)), station="NOCAL"))
+    http.post("/publications", params={"station": "NOCAL", "minute_utc": MIN})
+    r = http.post("/conversions", params={"station": "NOCAL", "minute_utc": MIN})
+    check("minute without calibration rejected", r.status_code == 409)
+    check("failed conversion leaves no rows",
+          http.get("/conversions", params={"station": "NOCAL"}).json() == [])
+
     print()
     if failures:
         print(f"{len(failures)} FAILURE(S): {failures}")
